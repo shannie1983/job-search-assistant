@@ -1,0 +1,61 @@
+# Personal source materials and generated application artifacts
+/Jobs/
+/outputs/
+/data/
+
+# Local profile data; keep only distributable templates
+/profile/*
+!/profile/master-profile.example.md
+!/profile/IMPORT_MEMORIES_PROMPT.md
+
+# Local configuration; keep only sanitized examples
+/config/*
+!/config/preferences.example.json
+!/config/job-preferences.example.md
+
+# Local agent/runtime state
+/.agents/
+/.claude/
+/.codex/
+/.tmp/
+
+# Run-specific or personal working notes
+/RUN_STATUS.md
+/INTERVIEW_PLAN.md
+/prompt.md
+
+# Secrets and environment configuration
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+*.pfx
+*.p12
+*credentials*
+*secret*
+
+# Dependencies, caches, logs, and temporary files
+/node_modules/
+__pycache__/
+*.py[cod]
+*.log
+*.tmp
+*.temp
+.DS_Store
+Thumbs.db
+
+# Personal/generated documents and recordings anywhere else
+*.docx
+*.dotx
+*.pdf
+*.wav
+*.webm
+*.mp3
+*.mp4
+
+# Test and coverage output
+/coverage/
+/.nyc_output/
+/.pytest_cache/
+

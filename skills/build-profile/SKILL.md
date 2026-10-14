@@ -1,0 +1,146 @@
+---
+name: build-profile
+description: >
+  Build or update the JobClaw master profile — the single file every other job-hunt
+  skill reads. Ingests a resume (extracting every embedded URL), LinkedIn PDF, exported
+  AI-memory, and links, then asks only for what's missing in one batched, optional gap
+  prompt. Captures career-goal context for downstream skills.
+when_to_use: >
+  Use at the start of a job hunt, when onboarding a new user, when the user shares a
+  resume/CV/LinkedIn export, or whenever profile/master-profile.md is missing or stale.
+user-invocable: true
+allowed-tools: Read, WebFetch, WebSearch, Write, Edit, Bash, mcp__playwright__browser_navigate, mcp__playwright__browser_snapshot
+---
+
+# build-profile
+
+Produce `profile/master-profile.md` from whatever the user already has, then fill gaps with a short, track-aware interview. **Ingest first, ask last.**
+
+## 1. Gather what exists (don't ask the user to retype anything)
+
+Collect any of these the user provides; actively offer the options:
+- **Resume / CV** — see step 1a for PDFs (mandatory link-extractor first), then read the body with your runtime's file-read tool.
+- **LinkedIn PDF** — read it. (Point them to LinkedIn → profile → *Resources* → *Save to PDF* if they don't have it.)
+- **AI-memory (proactively offer it).** Ask once: *"Have you used ChatGPT, Claude, or Gemini for your job search or career? Paste this prompt into the one you use most and bring back the result — I'll fold in recent interviews, feedback, and career details you'd otherwise have to retype."* Then surface the prompt from [`../../profile/IMPORT_MEMORIES_PROMPT.md`](../../profile/IMPORT_MEMORIES_PROMPT.md) (it pulls only **job-search-relevant** memories, not everything). On ingest, merge **only new facts** — never duplicate what the resume/profile already has; mark uncertain items `[VERIFY]`.
+- **Links** — record every link, then **enrich** the user's own ones (see §1b). LinkedIn stays record-only (ToS).
+
+Read everything before asking anything.
+
+### 1a. For every PDF input — run the link extractor FIRST
+
+A typical agent file-read tool surfaces visible anchor text only (it shows the word "LinkedIn" but not the URL it's hyperlinked to). LaTeX/Word/Docs resumes routinely embed `\href{url}{anchor}` annotations whose URLs are invisible to a plain read. **You will silently lose the user's LinkedIn / GitHub / portfolio URLs** if you skip this step — which is why `extract_links.py` exists.
+
+```
+python3 skills/build-profile/scripts/extract_links.py <path-to-resume.pdf>
+```
+
+The script decompresses every FlateDecode stream and pulls every `/URI` annotation it can find. Stdout is JSON:
+
+```jsonc
+{
+  "urls": ["https://...", ...],           // every URL found, in order
+  "classified": {
+    "linkedin": "https://linkedin.com/in/...",
+    "github": "https://github.com/...",
+    "other": { "<host-or-label>": "<url>", ... }
+  }
+}
+```
+
+The script also returns a **`status`** field — branch on it:
+- `ok` → use the `classified` map directly to populate `links:` (canonical keys land in their named
+  fields; unknowns land in `links.other`). Surface any `links.other` entries with one short question —
+  *"I found these other URLs in your resume: <list>. Keep any as portfolio links?"* — so project pages
+  (e.g. *lambdatest.com/visual-ai-testing*) can be promoted to `portfolio` if relevant.
+- `encrypted` / `scanned_image` / `unreadable` → the script never crashes (exit 0). When status is one
+  of these **and** the file-read tool also returns little/no body text, the PDF is unusable: tell the user
+  what's wrong (use the script's `note`) and offer the fallback ladder — (a) paste the resume text,
+  (b) supply a `.txt`/`.md`/`.docx` version, or (c) re-export from LinkedIn (*profile → Resources →
+  Save to PDF*). **Explicitly warn that embedded links are lost on scanned/encrypted PDFs** and ask
+  them to paste their LinkedIn / GitHub / portfolio URLs manually.
+
+After the extractor, use your runtime's file-read tool for body text. For non-PDF inputs (markdown, pasted text,
+LinkedIn URLs), scan the text directly with regex for any `https?://…` matches.
+
+### 1b. Enrich the user's own links (don't just record URLs)
+
+A portfolio or personal site usually holds proof points the resume omits (projects, metrics, roles,
+skills). Mine the user's **own** links — portfolio, personal site, project pages, and GitHub beyond the
+API — with a graceful fallback ladder. Skip LinkedIn (record-only, ToS). Cap at the few most relevant
+links so onboarding stays fast.
+
+For each link, stop at the first tier that yields usable content:
+1. **GitHub** → `WebFetch https://api.github.com/users/<user>` + `/repos?sort=stars` (top repos, languages, bio). No key.
+2. **`WebFetch` the page** → extract real proof points from the readable HTML.
+3. **`WebSearch`** (when WebFetch returns an SPA shell / thin content) → search the person + domain/handle for indexed content (project write-ups, talks, press).
+4. **Playwright MCP** (only if the session exposes it — optional, not required) → `mcp__playwright__browser_navigate` then `mcp__playwright__browser_snapshot` to render a JS-only page and read it. If Playwright isn't available, **skip it** and ask the user to paste a few highlights instead.
+
+**Rules:** ingest only **new** facts not already in the resume/profile (no duplication); mark anything
+inferred (not explicitly stated by the user) as `[VERIFY]`; **never fabricate**. Summarize what you
+learned back to the user in one line per link ("Your portfolio shows X, Y — added as projects").
+
+## 2. Know the track and region
+
+- **Track** (ask if unclear): `product · software · finance · quant · marketing · founders-office · hr · design · data · sales · operations · customer-success · content`. Decides which fields matter and which links to push for — see [reference/track-presets.md](reference/track-presets.md).
+- **Region**: infer the applicant's `region` using this ladder, stopping at the first that resolves:
+  1. **Location string** → region code (`New York`→`US`, `Bengaluru`→`IN`).
+  2. **Contact clues** if location is missing/ambiguous (e.g. "Remote") → a `+91` phone or `₹`/CTC/LPA
+     mentions → `IN`; a `+1` phone or `$`/state abbreviations → `US`.
+  3. **`target.regions`** if already known from the conversation.
+  4. **Otherwise ask one short question:** *"Which country are you based in, and where are you hunting?"*
+  Codes must match a pack in [`../../knowledge/regions/`](../../knowledge/regions/). **Never silently
+  default to US.** When region was inferred from weak signals (clues, not an explicit location), write
+  it as `[VERIFY]` so downstream skills treat it as soft. Then confirm where they're hunting
+  (`target.regions`). The chosen pack dictates which region-specific fields to collect (IN →
+  current/expected CTC + notice period; US → work authorization per
+  [`../../knowledge/work-authorization.md`](../../knowledge/work-authorization.md)) and what to omit
+  (e.g., don't collect photo/DOB).
+
+## 3. Ask only for gaps
+
+Compare what you extracted against [reference/profile-schema.md](reference/profile-schema.md). Then ask a **short, batched** set of questions for only the missing or `[VERIFY]` fields, prioritizing the track's must-haves, the **region's** required fields (per the region pack), and anything `find-jobs`/`score-fit` need (target roles, locations, remote preference, salary floor; work authorization for US; current/expected CTC + notice period for IN). Don't interrogate — 5–8 crisp questions max, grouped, with sensible defaults offered.
+
+### 3a. The single optional links-gap prompt
+
+After populating `links:` from extraction, run **one** track-aware optional prompt to surface what the resume didn't include. Use the link gap matrix in [reference/track-presets.md](reference/track-presets.md) to decide what to suggest.
+
+Shape:
+
+> *"I found these links: \<list of canonical keys filled\>. For \<track\> roles, candidates also commonly include: \<strongly + optional gaps from the matrix\>. Want to add any? (Paste or skip.)"*
+
+**One prompt. Dismissible. No follow-ups.** The user can paste any handle/URL or skip entirely.
+
+### 3b. Two closing context prompts
+
+The `context:` block is read by `find-jobs`, `score-fit`, and `tailor-resume` to bias direction — never rendered into a PDF or external message. Ask once:
+
+1. *"In 2–3 sentences, what are you actually optimizing for over the next 12–24 months?"* → `context.career_goal` (≤ 600 chars).
+2. *"Anything else I should know that won't go on the resume — geo constraints, life situation, things to avoid?"* → `context.additional_info` (≤ 400 chars). Skip if the conversation already covered it; record what surfaced.
+
+Both fields are optional but high-value.
+
+### 3c. The single optional proof-point gap prompt
+
+Gaps aren't just blank fields — the highest-value gap is **evidence a strong candidate for *this target* would show but the resume doesn't**. Compute the expected proof points for the user's `target.tracks` (+ AI archetype if applicable) from the **"Proof-point coverage"** section of [reference/track-presets.md](reference/track-presets.md) (which points at the archetype proof points in [`../../knowledge/ai-roles.md`](../../knowledge/ai-roles.md) for AI tracks). Check coverage against the extracted Experience/Projects/Achievements, then ask **one** target-framed prompt:
+
+> *"Strong \<target track/archetype\> candidates usually show \<X / Y / Z\>. From your resume I can see \<X\>; I don't see \<Y, Z\> — anything to add there? (Paste or skip.)"*
+
+This is the fix for the case where a missing portfolio/case-study (marketing) or eval/LLMOps evidence (AI Platform) is the candidate's **#1 gap for their target**, not a generic blank. Frame it by the target, never invent the evidence. **One prompt. Dismissible. No follow-ups.** Shares the relevance vocabulary in [`../../knowledge/relevance.md`](../../knowledge/relevance.md).
+
+## 4. Write the profile
+
+Write `profile/master-profile.md` following [reference/profile-schema.md](reference/profile-schema.md) exactly (YAML frontmatter + markdown sections). Rules:
+- **Never fabricate.** If a fact is unknown, leave the field empty / omit it; mark anything uncertain inline as `[VERIFY]`.
+- Quantify achievements where the source gives numbers; don't invent metrics.
+- Capture the user's **voice/constraints** in the Notes section (tone, hard limits like no-relocation, sponsorship needs) — downstream skills rely on it.
+- Populate **every** link the extractor found (canonical keys to their named fields; everything else under `links.other`). Keep unfamiliar URLs even if you can't classify them.
+- If the file already exists, **update in place** (preserve user edits; only fill/correct).
+
+## 5. Confirm
+
+Show a tight summary (identity, target, # roles captured, # links captured, gaps still `[VERIFY]`) and tell the user they can now run `/find-jobs`. Keep tone encouraging and concise — no emoji.
+
+**Heads-up on setup (mention once, now).** Run `python3 scripts/doctor.py` to check dependencies. Everything works with no install **except producing resume PDFs**, which needs **rendercv** (a one-time install: `python3 -m venv skills/render-resume/.venv && skills/render-resume/.venv/bin/pip install "rendercv[full]"`). Flag this here so it's installed before the user reaches `/tailor-resume`, not mid-render. (API keys are all optional; doctor lists which strengthen find-jobs/research.)
+
+## Next steps
+Profile saved. Next: `/find-jobs` to pull matching roles — or `/apply-to-job <url>` to evaluate one specific job end-to-end.

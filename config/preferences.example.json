@@ -1,0 +1,26 @@
+{
+  "status": "incomplete",
+  "target_roles": [],
+  "keywords": [],
+  "preferred_locations": [],
+  "employment_types": [],
+  "preferred_industries": [],
+  "work_arrangements": [],
+  "sources": [],
+  "experience_years": null,
+  "skills": [],
+  "salary": {
+    "minimum": null,
+    "maximum": null,
+    "currency": "USD"
+  },
+  "master_resume": null,
+  "max_resume_pages": null,
+  "preference_modes": {
+    "target_roles": "preferred",
+    "keywords": "preferred",
+    "preferred_locations": "required",
+    "sources": "preferred"
+  },
+  "search_schedules": []
+}
